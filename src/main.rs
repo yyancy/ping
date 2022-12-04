@@ -1,59 +1,60 @@
 extern crate pnet;
 
-use pnet::datalink::{self, NetworkInterface};
-use pnet::datalink::Channel::Ethernet;
-use pnet::packet::{Packet, MutablePacket};
-use pnet::packet::ethernet::{EthernetPacket, MutableEthernetPacket};
+use pnet::packet::{MutablePacket, Packet};
+use pnet::packet::icmp::echo_reply;
+use pnet::transport::TransportProtocol::Ipv4;
+use pnet::packet::icmp::{echo_request::MutableEchoRequestPacket, IcmpTypes};
+use pnet::packet::ip::IpNextHeaderProtocols::Icmp;
+use pnet::transport::{TransportChannelType, transport_channel, icmp_packet_iter};
+// use pnet::transport::{icmp_packet_iter, transport_channel, TransportChannelType};
+use std::net::{IpAddr, Ipv4Addr};
+use std::thread;
+use std::time::Duration;
 
-use std::env;
-
-// Invoke as echo <interface name>
 fn main() {
-    let interface_name = env::args().nth(1).unwrap();
-    let interface_names_match =
-        |iface: &NetworkInterface| iface.name == interface_name;
-
-    // Find the network interface with the provided name
-    let interfaces = datalink::interfaces();
-    let interface = interfaces.into_iter()
-                              .filter(interface_names_match)
-                              .next()
-                              .unwrap();
-
-    // Create a new channel, dealing with layer 2 packets
-    let (mut tx, mut rx) = match datalink::channel(&interface, Default::default()) {
-        Ok(Ethernet(tx, rx)) => (tx, rx),
-        Ok(_) => panic!("Unhandled channel type"),
-        Err(e) => panic!("An error occurred when creating the datalink channel: {}", e)
+    let (mut tx, mut rx) = 
+    match transport_channel(1500, TransportChannelType::Layer4(Ipv4(Icmp))) {
+        Ok((tx, rx)) => (tx, rx),
+        Err(e) => panic!("An error occurred when creating transport channel: {}", e),
     };
+    let mut payload = [0u8;43];
+    let dst = "114.114.114.114".parse::<Ipv4Addr>().unwrap();
+    let mut recv = icmp_packet_iter(&mut rx);
 
-    loop {
-        match rx.next() {
-            Ok(packet) => {
-                let packet = EthernetPacket::new(packet).unwrap();
+    thread::spawn(move || {
 
-                // Constructs a single packet, the same length as the the one received,
-                // using the provided closure. This allows the packet to be constructed
-                // directly in the write buffer, without copying. If copying is not a
-                // problem, you could also use send_to.
-                //
-                // The packet is sent once the closure has finished executing.
-                tx.build_and_send(1, packet.packet().len(),
-                    &mut |mut new_packet| {
-                        let mut new_packet = MutableEthernetPacket::new(new_packet).unwrap();
+        let mut seq = 10000;
+        loop {
+            thread::sleep(Duration::from_secs(1));
+            
+            let mut ping = MutableEchoRequestPacket::new(&mut payload).unwrap();
+            ping.set_icmp_type(IcmpTypes::EchoRequest);
+            ping.set_identifier(0xbabe);
+            ping.set_sequence_number(seq);
+            ping.set_payload("I do success finally. /(ㄒoㄒ)/~~".as_bytes());
+            seq = seq +1;
+            let sum = pnet::util::checksum(&ping.packet_mut(),1);
+            ping.set_checksum(sum);
 
-                        // Create a clone of the original packet
-                        new_packet.clone_from(&packet);
-
-                        // Switch the source and destination
-                        new_packet.set_source(packet.get_destination());
-                        new_packet.set_destination(packet.get_source());
-                });
-            },
-            Err(e) => {
-                // If an error occurs, we can handle it here
-                panic!("An error occurred while reading: {}", e);
-            }
+            println!("ping packet {:#?}", ping);
+            println!("Bytes sent: {}", tx.send_to(ping, IpAddr::V4(dst)).unwrap());
         }
+
+    });
+
+        loop {
+        match recv.next() {
+            Ok((pkt, addr)) => {
+              match pkt.get_icmp_type(){
+                IcmpTypes::EchoReply => {
+                  let reply = echo_reply::EchoReplyPacket::new(pkt.packet());
+                println!("from {} receive icmp reply {:#?}", addr, reply);
+                }
+                _ => {}
+              }
+            },
+            Err(e) => eprintln!("Error: {} ", e),
+        }
+
     }
 }
